@@ -1,0 +1,109 @@
+#!/bin/sh
+set -e      # Abort upon error
+set -u      # Abort upon udefined variable
+#set -x     # Print every command
+#set -o pipefail # Prevents errors in a pipeline from being masked (not supported by dash yet)
+
+readonly path="$(dirname -- "$(readlink -f -- "$0")")"
+
+#######################################
+#   Description:
+#       Update zone records on Cloudflare
+#       To be used as a dhclient exit hook.
+#       See: /etc/dhcp/dhclient-exit-hooks.d
+#
+#       Only supports IPv4.
+#   Usage:
+#       ./cloudflare_ddns
+#   Arguments:
+#        None!
+#   Returns:
+#       0 upon success
+#       >=1 upon error
+#######################################
+main() {
+    # Check if $USAGE is respected
+    readonly USAGE='Usage: ./cloudflare_ddns'
+    [ "$#" -ne 0 ] && err "Error: 0 argument(s) expected, $# received" && err "$USAGE" && return 1
+
+    for f in "$path"/*.env; do
+        # Load env
+        set -a; . "$f"; set +a
+
+        # Fetch zone id
+        zone_id="$(get_zone_id)"
+        [ ! -z "$zone_id" ] || { err "Zone ID for '$CLOUDFLARE_ZONE' could not be fetched."; return 1; }
+
+        # Fetch record id
+        record_id="$(get_record_id "$zone_id")"
+        [ ! -z "$record_id" ] || { err "Record ID for '$CLOUDFLARE_RECORD_NAME' could not be fetched."; return 1; }
+
+        # Fetch IP from provided public-facing interface
+        export CLOUDFLARE_RECORD_CONTENT="$(new_ipv4)"
+        [ ! -z "$CLOUDFLARE_RECORD_CONTENT" ] || { err "IP address on interface '$PUBLIC_IF' could not be found."; return 1; }
+
+        # Update record
+        update_success="$(put_record_content "$zone_id" "$record_id")"
+        [ "$update_success" = "true" ] \
+            && printf '%s-record "%s" updated to "%s".\n' "$CLOUDFLARE_RECORD_TYPE" "$CLOUDFLARE_RECORD_NAME" "$CLOUDFLARE_RECORD_CONTENT" \
+            || { err "Update of $CLOUDFLARE_RECORD_TYPE-record '$CLOUDFLARE_RECORD_NAME' failed."; return 1; }
+
+    done
+}
+
+new_ipv4() {
+    ip -4 a show "$PUBLIC_IF" | grep -oP '(?<=inet\s)\d+(\.\d+){3}'
+}
+
+get_zone_id() {
+    curl \
+        --silent \
+        --request GET \
+        --header "Content-Type:application/json" \
+        --header "Authorization: Bearer $CLOUDFLARE_API_KEY" \
+        "https://api.cloudflare.com/client/v4/zones" \
+        | jq -r ".result | map(select(.name == \"$CLOUDFLARE_ZONE\")) | .[].id"
+}
+
+get_record_id() {
+    curl \
+        --silent \
+        --request GET \
+        --header "Content-Type:application/json" \
+        --header "Authorization: Bearer $CLOUDFLARE_API_KEY" \
+        "https://api.cloudflare.com/client/v4/zones/$1/dns_records" \
+        | jq -r ".result | map(select(.name == \"$CLOUDFLARE_RECORD_NAME\" and .type == \"$CLOUDFLARE_RECORD_TYPE\")) | .[].id"
+}
+
+put_record_content() {
+   curl \
+        --silent \
+        --request PUT \
+        --header "Authorization: Bearer $CLOUDFLARE_API_KEY" \
+        --data "$(get_record_update_object)" \
+        "https://api.cloudflare.com/client/v4/zones/$1/dns_records/$2" \
+        | jq -r ".success"
+}
+
+get_record_update_object() {
+    echo "$json_update_object" \
+    | envsubst '$CLOUDFLARE_RECORD_TYPE,$CLOUDFLARE_RECORD_NAME,$CLOUDFLARE_RECORD_CONTENT$,$CLOUDFLARE_RECORD_TTL,$CLOUDFLARE_RECORD_PROXIED'
+}
+
+readonly json_update_object='{
+    "type": "${CLOUDFLARE_RECORD_TYPE}",
+    "name": "${CLOUDFLARE_RECORD_NAME}",
+    "content": "${CLOUDFLARE_RECORD_CONTENT}",
+    "ttl": "${CLOUDFLARE_RECORD_TTL}",
+    "proxied": ${CLOUDFLARE_RECORD_PROXIED}
+}
+'
+
+#######################################
+#   Print error message to stderr
+#   https://google.github.io/styleguide/shellguide.html
+#######################################
+err() { echo "[$(date +'%Y-%m-%dT%H:%M:%S%z')]: $*" >&2; }
+
+main "$@"; exit
+
