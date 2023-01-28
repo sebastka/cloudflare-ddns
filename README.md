@@ -11,5 +11,5 @@ $ vi www.karlsen.fr.env
 ## dhclient exit hook
 
 ```bash
-$ ls -s /path/to/script/cloudflare-ddns/cloudflare-ddns /etc/dhcp/dhclient-exit-hooks.d/
+$ ln -s /path/to/script/cloudflare-ddns/cloudflare-ddns /etc/dhcp/dhclient-exit-hooks.d/
 ```
